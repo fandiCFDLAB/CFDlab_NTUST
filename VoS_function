@@ -1,0 +1,122 @@
+subroutine func_Cylinder()
+
+use variables
+implicit none
+
+integer:: az_min,az_max,ay_min,ay_max
+integer:: m, n, xi
+real*8 :: yf, zf
+real*8 ,dimension(1:nSubGrids_f+1) :: SY
+real*8 ,dimension(1:nSubGrids_f+1) :: SZ
+real*8	:: inv_subgrid1 = 1.d0/ (nSubGrids_f*1.d0)
+real*8	:: inv_subgrid2 = 1.d0/ (nSubGrids_f**2*1.d0)
+
+   !---------------------------------------------------!
+   !    LOCAL VARIABLES                                !
+   !---------------------------------------------------!
+
+! Create coarse ETA (only 0 or 1)
+i=0
+az_min = nz ; az_max = 0
+ay_min = ny ; ay_max = 0
+
+!$acc data present(Y,Z,Ys,Zs,iDy,iDz,ETA) create(SY,SZ)
+
+!$OMP PARALLEL DO PRIVATE(j,Yf,Zf) REDUCTION(max : az_max,ay_max) &
+!$OMP			  REDUCTION(min : az_min,ay_min) collapse(2)
+!$acc parallel vector_length(32)
+!$acc loop private(Yf,Zf) reduction(max : az_max,ay_max) reduction(min : az_min,ay_min) collapse(2) gang vector
+
+do k=1,nz
+	do j=1,ny
+
+		Zf = Zs(k) - z0_t
+		Yf = Ys(j) - y0_t
+
+	if( (Zf**2 + Yf**2) .LE. r**2) then
+		ETA(i,j,k)=1.D0
+		az_min = MIN0(k,az_min)
+		az_max = MAX0(k,az_max)
+		ay_min = MIN0(j,ay_min)
+		ay_max = MAX0(j,ay_max)
+	else
+		ETA(i,j,k)=0.D0		
+	endif
+	
+	end do
+end do
+!$acc end parallel
+!$OMP END PARALLEL DO
+
+! Setting the boundary for subgrids
+	iBgnVOS = 0
+	iEndVOS = nx+1
+	jBgnVOS = ay_min - 1
+	jEndVOS = ay_max + 1
+	kBgnVOS = az_min - 1
+	kEndVOS = az_max + 1
+
+! Creating subgrids
+i=iBgnVOS
+!$OMP PARALLEL DO PRIVATE(j,m,n,SY,SZ,Yf,Zf,xi) collapse(2)
+!$acc parallel vector_length(32)
+!$acc loop private(m,n,SY,SZ,Yf,Zf,xi) collapse(2) gang
+do k=kBgnVOS,kEndVOS
+do j=jBgnVOS,jEndVOS
+	! Finding potential grids for subgrids
+	if(ANY(ETA(i,j,k) /= ETA(i, j-1:j+1, k-1:k+1))) then
+            
+			!$acc loop
+            do n=1,nSubGrids_f,1
+				SY(n) = Y(j) + (n - 0.5d0)*iDy(j)*inv_subgrid1
+				SZ(n) = Z(k) + (n - 0.5d0)*iDz(k)*inv_subgrid1
+			enddo
+
+		    xi = 0
+            !$acc loop private(n,Yf,Zf) reduction(+:xi)
+            do m=1,nSubGrids_f,1
+            !$acc loop private(Yf,Zf) reduction(+:xi)
+            do n=1,nSubGrids_f,1
+
+					Zf = SZ(n) - z0_t
+					Yf = SY(m) - y0_t
+					
+				if( (Zf**2 + Yf**2) .LE. r**2) then
+						xi = xi + 1
+				endif
+			end do; end do
+		   
+		  ETA(i,j,k) = xi*inv_subgrid2
+	endif
+end do
+end do		
+!$acc end parallel
+!$OMP END PARALLEL DO
+
+!$OMP PARALLEL DO PRIVATE(j,i) collapse(3)
+!$acc parallel loop collapse(3) gang vector
+do k=kBgnVOS-3,kEndVOS+3
+do j=jBgnVOS-3,jEndVOS+3
+do i=iBgnVOS+1,iEndVOS
+	ETA(i,j,k) = ETA(iBgnVOS,j,k)
+end do
+end do
+end do   
+!$acc end parallel
+!$OMP END PARALLEL DO  
+
+!$acc end data
+
+    if(myid==master .AND. istep == 0)then
+		open (61,file='solid_motion.dat',position='append')
+        write(61,*)'                 '
+        write(61,*)'SOLID MOTION'
+		write(61,*) ' VARIABLES = t*,x,y,z,u_solid,v_solid,w_solid'
+        write(61,*)'                 '
+    else if (myid==master) then
+		open (61,file='solid_motion.dat',position='append')
+        write(61,'(F12.7,6(3X,F12.7))') time, x0_t, y0_t, z0_t, u_solid, v_solid, w_solid
+	endif
+    close(61)
+
+end subroutine func_Cylinder
